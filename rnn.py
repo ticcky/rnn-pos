@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-from numpy import zeros, ones, dot, exp, mat, array, random
+from numpy import zeros, ones, dot, exp, mat, array, random, abs, multiply
 
 class RNN:
     n_inputs = None
@@ -17,76 +17,109 @@ class RNN:
         self.U = random.random((self.n_hidden, self.n_hidden))
         self.V = random.random((self.n_hidden, self.n_inputs))
         self.W = random.random((self.n_outputs, self.n_hidden))
-        self.Theta_j = zeros(self.n_hidden)
-        self.Theta_k = zeros(self.n_outputs)
-        self.y_p = zeros(self.n_hidden)
-        self.x_p = zeros(self.n_inputs)
-        self.x_pp = [zeros(self.n_inputs) for n in range(p_time)]
-        self.y_pp = [zeros(self.n_hidden) for n in range(p_time)]
+        self.y_p = mat(zeros(self.n_hidden))
+        self.x_p = mat(zeros(self.n_inputs))
+        self.x_pp = [mat(zeros(self.n_inputs)) for n in range(p_time)]
+        self.y_pp = [mat(zeros(self.n_hidden)) for n in range(p_time)]
 
-    def g(self, x):
+    def f(self, x):
         return 1/(1 + exp(-x))
 
-    def g_prime(self, x):
-        return x*(1 - x)
+    def f_prime(self, x):
+        return multiply(x, (1 - x))
 
-    f = g
-    f_prime = g_prime
+    def get_hidden_state_matrix(self):
+        return mat(zeros((self.n_hidden, 1)))
+    
+    def g(self, x):
+        t = exp(x)
+        denom = t.sum()
+        return t / denom #exp(x) #/ denom
 
-    def reset_hidden(self):
-        self.y_p = zeros(self.n_hidden)
-        self.y_pp = [zeros(self.n_hidden) for n in range(self.p_time)] #zeros(self.n_hidden)
-        
+    def g_primex(self, x):
+        denom = sum([exp(i) for i in x])
+        return array([1 - sum([a/denom for a in x if a != i]) for i in x])
+    
+    def feed(self, x, y_p):
+        y_p = self.f(dot(self.V, x) + dot(self.U, y_p)) # + dot(self.y_p, self.U))
+        y_k = self.g(dot(self.W, y_p))
 
-    def feed(self, x):
-        self.y_pp.insert(0, self.y_p)
-        self.y_pp = self.y_pp[:self.p_time + 1]
-        self.x_pp.insert(0, self.x_p)
-        self.x_pp = self.x_pp[:self.p_time]
-        #self.y_pp = self.y_p
-        self.x_p = x
-        self.y_p = self.f(dot(self.V, x) + dot(self.U, self.y_p) + self.Theta_j)
-        y_k = self.g(dot(self.W, self.y_p) + self.Theta_k)
-        return y_k
+        return y_k, y_p #.transpose()
 
     def train(self, train_set, ni = 0.1):
+        W = self.W
+        Wt = self.W.transpose()
+        # init delta weights
         dW = zeros((self.n_outputs, self.n_hidden))
         dV = zeros((self.n_hidden, self.n_inputs))
         dU = zeros((self.n_hidden, self.n_hidden))
-        self.reset_hidden()
+        
         cntr = 0
+        x_v = mat(zeros((self.n_inputs, 1)))
+        d_v = mat(zeros((self.n_outputs, 1)))
+        y_p = self.get_hidden_state_matrix()
+        def zero(vector):
+            for i in range(len(vector)):
+                vector[i] = 0.0
+
+        # go through the training set and accumulate the weight changes
         for x, d in train_set:
             cntr += 1
             if cntr % 100 == 0:
                 print cntr
+
+            # reset hidden layer (e.g. to be able to account for the sentence end)
+            if x is None:
+                y_p = self.get_hidden_state_matrix()
+                continue
+
+            # prepare the input and output vectors
             if type(x) == int:
-                x_v = zeros(self.n_inputs)
-                d_v = zeros(self.n_outputs)
-                x_v[x] = 1.0
-                d_v[d] = 1.0
+                # we don't have to zero the vector here, because we always zero it when finishing the iteration
+                #zero(x_v)
+                #zero(d_v)
+                x_v[x,0] = 1.0
+                d_v[d,0] = 1.0
             else:
                 x_v = x
                 d_v = d
-            
-            y = self.feed(x_v)
-            d_k = (d_v - y) * self.g_prime(y)
-            y_j = self.y_p
-            d_j = dot(d_k, self.W) * self.f_prime(self.y_p)
-            y_pp = self.y_pp[0]
-            
-            dW += ni * dot(mat(d_k).transpose(), mat(y_j))
-            dV += ni * dot(mat(d_j).transpose(), mat(x_v))
-            dU += ni * dot(mat(d_j).transpose(), mat(y_pp))
 
-            for i in range(self.p_time):
-                d_j = dot(d_j, self.U)*self.f_prime(self.y_pp[i])
-                dV += ni * dot(mat(d_j).transpose(), mat(self.x_pp[i]))
-                dU += ni * dot(mat(d_j).transpose(), mat(self.y_pp[i + 1]))
+            # get the network's output for the current input, and it's hidden layer output
+            y_k, y_j = self.feed(x_v, y_p)
+            #y_k, y_j = mat(zeros(self.n_outputs)).transpose(), mat(zeros(self.n_hidden))
+            # y_k - column vector
+            # y_j - row vector
+
+            # get gradient for function g (sotfmax)
+            d_k = (d_v - y_k)  
+            # d_k - column vector
+
+            # get gradient for function f (sigmoid)          
+            d_j = multiply(self.f_prime(y_j),  Wt * d_k) #multiply(dot(d_k.transpose(), self.W), self.f_prime(y_j))
+
+            dW += d_k * y_j.transpose()
+            #dV += dot(d_j.transpose(), x_v)
+            dV[:,x] = d_j.transpose()
+            dU += d_j * y_p.transpose()
+
+            y_p = y_j
+
+            # clean up
+            x_v[x,0] = 0.0
+            d_v[d,0] = 0.0
+
+            # BPTT
+            #for i in range(self.p_time):
+            #    d_j = dot(d_j, self.U)*self.f_prime(self.y_pp[i])
+            #    dV += ni * dot(mat(d_j).transpose(), mat(self.x_pp[i]))                
+            #    dU += ni * dot(mat(d_j).transpose(), mat(self.y_pp[i + 1]))
                 
+            #import pdb; pdb.set_trace()
+        self.W += ni * dW
+        self.V += ni * dV
+        self.U += ni * dU
 
-        self.W += dW
-        self.V += dV
-        self.U += dU
+        return sum(abs([sum(sum(dW)),sum(sum(dV)), sum(sum(dU))]))
 
 if __name__ == "__main__":
     train_data =         [
